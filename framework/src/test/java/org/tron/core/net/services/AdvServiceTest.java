@@ -2,20 +2,22 @@ package org.tron.core.net.services;
 
 import static org.mockito.Mockito.mock;
 
-import java.io.File;
+import java.io.IOException;
 import java.net.InetSocketAddress;
+
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.mockito.Mockito;
 import org.springframework.context.ApplicationContext;
+import org.tron.common.TestConstants;
 import org.tron.common.application.TronApplicationContext;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.utils.FileUtil;
 import org.tron.common.utils.ReflectUtils;
 import org.tron.common.utils.Sha256Hash;
-import org.tron.core.Constant;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
@@ -31,17 +33,18 @@ import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Inventory.InventoryType;
 
 public class AdvServiceTest {
-  private static String dbPath = "output-adv-service-test1";
   private static TronApplicationContext context;
   private static AdvService service;
   private static P2pEventHandlerImpl p2pEventHandler;
   private static ApplicationContext ctx;
 
+  @ClassRule
+  public static final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
   @BeforeClass
-  public static void init() {
-    dbPath = "output-adv-service-test";
-    Args.setParam(new String[]{"--output-directory", dbPath, "--debug"},
-            Constant.TEST_CONF);
+  public static void init() throws IOException {
+    Args.setParam(new String[]{"--output-directory",
+        temporaryFolder.newFolder().toString(), "--debug"}, TestConstants.TEST_CONF);
     context = new TronApplicationContext(DefaultConfig.class);
     service = context.getBean(AdvService.class);
     p2pEventHandler = context.getBean(P2pEventHandlerImpl.class);
@@ -50,9 +53,11 @@ public class AdvServiceTest {
 
   @AfterClass
   public static void after() {
+    for (PeerConnection p : PeerManager.getPeers()) {
+      PeerManager.remove(p.getChannel());
+    }
     Args.clearParam();
     context.destroy();
-    FileUtil.deleteDir(new File(dbPath));
   }
 
   @Test
@@ -72,10 +77,17 @@ public class AdvServiceTest {
 
     Item itemBlock = new Item(Sha256Hash.ZERO_HASH, InventoryType.BLOCK);
     flag = service.addInv(itemBlock);
+    Assert.assertFalse(flag);
+
+    BlockCapsule.BlockId blockId = new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, 1000L);
+    itemBlock = new Item(blockId, InventoryType.BLOCK);
+    flag = service.addInv(itemBlock);
     Assert.assertTrue(flag);
     flag = service.addInv(itemBlock);
     Assert.assertFalse(flag);
 
+    blockId = new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, 10000L);
+    itemBlock = new Item(blockId, InventoryType.BLOCK);
     service.addInvToCache(itemBlock);
     flag = service.addInv(itemBlock);
     Assert.assertFalse(flag);
@@ -104,12 +116,28 @@ public class AdvServiceTest {
   }
 
   private void testTrxBroadcast() {
-    Protocol.Transaction trx = Protocol.Transaction.newBuilder().build();
+    Protocol.Transaction trx = Protocol.Transaction.newBuilder()
+        .setRawData(
+        Protocol.Transaction.raw.newBuilder()
+            .setRefBlockNum(1)
+            .setExpiration(System.currentTimeMillis() + 3000).build()).build();
     CommonParameter.getInstance().setValidContractProtoThreadNum(1);
     TransactionMessage msg = new TransactionMessage(trx);
     service.broadcast(msg);
     Item item = new Item(msg.getMessageId(), InventoryType.TRX);
     Assert.assertNotNull(service.getMessage(item));
+
+    Protocol.Transaction expiredTrx = Protocol.Transaction.newBuilder()
+        .setRawData(
+            Protocol.Transaction.raw.newBuilder()
+            .setRefBlockNum(1)
+            .setExpiration(System.currentTimeMillis() - 1).build())
+        .build();
+    CommonParameter.getInstance().setValidContractProtoThreadNum(1);
+    TransactionMessage msg1 = new TransactionMessage(expiredTrx);
+    service.broadcast(msg);
+    Item item1 = new Item(msg1.getMessageId(), InventoryType.TRX);
+    Assert.assertNull(service.getMessage(item1));
   }
 
 }
